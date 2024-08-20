@@ -7,12 +7,29 @@ const { Job } = require('./job_model.js');
 const { Completed_Jobs } = require('./completed_job_model.js');
 const { Worker } = require('worker_threads');
 const { updateJobs } = require("./update_created_jobs.js");
+const { connect } = require('http2');
+const amqp = require('amqplib');
+
+
 
 const app = express();
 const port = 3000;
 
-app.use(express.urlencoded({ extended: true }));
+let channel;
+let connection;
 
+const connectRabbitMQ = async () => {
+    try {
+        connection = await amqp.connect('amqp://localhost'); // Use your RabbitMQ URL
+        channel = await connection.createChannel();
+        await channel.assertQueue('jobQueue', { durable: true });
+    } catch (error) {
+        console.error('Error connecting to RabbitMQ:', error);
+    }
+};
+
+app.use(express.static('public'));
+app.use(express.urlencoded({ extended: true }));
 app.set('view engine', 'ejs');
 
 const worker = new Worker('./thread.js');
@@ -38,8 +55,8 @@ app.get('/', (req, res, next) => {
 });
 
 app.post('/', async (req, res) => {
-    const { taskType, title, description, url, time, date, cron_exp, priority } = req.body;
-    const job = new Job({ taskType, title, description, url, time, date, cron_exp, priority });
+    const { taskType, title, description, url, time, date, cron_exp, priority} = req.body;
+    const job = new Job({ taskType, title, description, url, time, date, cron_exp, priority});
 
     if (taskType === 'event') {
         const timePattern = /^(\d{1,2}):(\d{2})\s(AM|PM)$/i;
@@ -67,12 +84,17 @@ app.post('/', async (req, res) => {
 
     try {
         await job.save();
+        const jobData = JSON.stringify(job);
+        channel.sendToQueue('jobQueue', Buffer.from(jobData), { persistent: true });
+        console.log('Job published to rabbitmq:', jobData);
         res.redirect('/');
     } catch (err) {
         console.error(err);
         res.send('<script>alert("Error occurred while saving the job."); window.location.href="/";</script>');
     }
 });
+
+
 
 app.post('/delete', async (req, res) => {
     const { id } = req.body;
@@ -83,9 +105,11 @@ app.post('/delete', async (req, res) => {
 
 connectToDatabase()
     .then(() => {
-        updateJobs().then(() => {
-            app.listen(port, () => {
-                console.log(`Server is running on port ${port}`);
+        connectRabbitMQ().then(() => {;
+            updateJobs().then(() => {
+                app.listen(port, () => {
+                    console.log(`Server is running on port ${port}`);
+                });
             });
         });
     })
